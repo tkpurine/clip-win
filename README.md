@@ -1,4 +1,4 @@
-# clipy-win
+# clip-win
 
 Windows 向け軽量クリップボードマネージャー。  
 macOS の [Clipy](https://github.com/Clipy/Clipy) にインスパイアされ、  

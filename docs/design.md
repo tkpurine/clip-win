@@ -1,4 +1,4 @@
-# clipy-win 設計書
+# clip-win 設計書
 
 **バージョン**: 1.0  
 **作成日**: 2026-05-23  
@@ -136,7 +136,7 @@ WPF はカスタム UI には強力だが、このアプリには過剰。
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                   clipy-win.exe                          │
+│                   clip-win.exe                          │
 │                                                          │
 │  ┌────────────────────────────────────────────────────┐  │
 │  │  Program.cs  (エントリポイント)                    │  │
@@ -255,7 +255,7 @@ WPF はカスタム UI には強力だが、このアプリには過剰。
 
 ```
 ┌─────────────────────────────────────┐
-│  設定 — clipy-win                   │
+│  設定 — clip-win                   │
 ├─────────────────────────────────────┤
 │  ホットキー      [Ctrl+Shift+V    ] │  ← クリックして押鍵で記録
 │  履歴の最大件数  [100             ] │
@@ -271,7 +271,7 @@ WPF はカスタム UI には強力だが、このアプリには過剰。
 
 ```
 ┌──────────────────────────────────────────────┐
-│  スニペット管理 — clipy-win                  │
+│  スニペット管理 — clip-win                  │
 ├──────────────────┬───────────────────────────┤
 │ 📁 挨拶文        │  タイトル                 │
 │   こんにちは     │  [こんにちは            ] │
@@ -293,7 +293,7 @@ WPF はカスタム UI には強力だが、このアプリには過剰。
 ### 保存場所
 
 ```
-%APPDATA%\clipy-win\clipy-win.db
+%APPDATA%\clip-win\clip-win.db
 ```
 
 ### テーブル定義
@@ -354,8 +354,8 @@ WPF はカスタム UI には強力だが、このアプリには過剰。
 ### ファイル構成
 
 ```
-clipy-win/
-├── clipy-win.csproj
+clip-win/
+├── clip-win.csproj
 ├── Program.cs                   エントリポイント・単一インスタンス制御
 ├── AppController.cs             ApplicationContext・サービス統括・トレイ管理
 │
@@ -488,7 +488,7 @@ dotnet publish -c Release -r win-x64 \
   --self-contained true \
   -p:PublishSingleFile=true \
   -p:IncludeNativeLibrariesForSelfExtract=true
-# → bin/Release/net8.0-windows/win-x64/publish/clipy-win.exe
+# → bin/Release/net8.0-windows/win-x64/publish/clip-win.exe
 ```
 
 ### 配布形式
