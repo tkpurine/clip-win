@@ -1,9 +1,9 @@
 # clip-win 設計書
 
-**バージョン**: 2.0
+**バージョン**: 3.0
 **作成日**: 2026-05-23
 **更新日**: 2026-05-24
-**ステータス**: Draft
+**ステータス**: Ready for Implementation
 
 ---
 
@@ -18,6 +18,9 @@
 7. [モジュール設計](#7-モジュール設計)
 8. [開発フェーズ](#8-開発フェーズ)
 9. [ビルド・配布方針](#9-ビルド配布方針)
+10. [検討経緯（Decision Log）](#10-検討経緯decision-log)
+11. [開発環境セットアップ](#11-開発環境セットアップ)
+12. [次のアクション](#12-次のアクション)
 
 ---
 
@@ -633,3 +636,395 @@ cargo tauri build
 | インストーラーサイズ | 〜6MB |
 | インストール後サイズ | 〜15MB |
 | 常駐メモリ（アイドル） | 8〜15MB |
+
+---
+
+## 10. 検討経緯（Decision Log）
+
+設計に至るまでの検討過程を記録する。別環境・別セッションで再開する際の文脈として活用すること。
+
+---
+
+### 10-1. 出発点
+
+- 参照アプリ: macOS の **Clipy**（[github.com/Clipy/Clipy](https://github.com/Clipy/Clipy)）
+- Clipy の実態を調査した結果：
+  - **Swift + AppKit** 製
+  - UI は `NSMenu`（macOS OS 標準カスケードメニュー）をそのまま使用
+  - **検索機能は存在しない**（当初の認識は誤りだった）
+  - 軽さの本質 = カスタム UI を一切持たず、OS が描画するメニューのみ使う設計
+
+---
+
+### 10-2. 技術スタックの変遷
+
+#### ① C# WPF（初期案）→ 棄却
+
+最初に「Windows の主流デスクトップ技術」として WPF を検討。  
+調査後に棄却。
+
+**棄却理由:**
+- 空アプリのメモリが 40〜60MB（WinForms の約 7 倍）
+- DirectX 初期化コストで起動が遅い
+- OS ネイティブメニューの質感が出しにくい
+- C# を使った主要 OSS クリップボードマネージャーが存在しないことも判明
+
+#### ② C# WinForms → 最終的に棄却
+
+WPF 棄却後に WinForms を検討。実際に大半のコードを書いた段階で再評価。
+
+**評価:**
+- 常駐メモリ 6〜8MB ✅
+- `ContextMenuStrip` が OS ネイティブメニューと同等の質感 ✅
+- `ToolStripTextBox` で検索ボックスをメニュー内に 1 行埋め込める ✅
+- Windows 専用（macOS 対応不可）❌
+
+**棄却理由:** 将来的な macOS 対応の可能性を考慮して最終的に却下。
+
+#### ③ UI 方針の整理（Clipy との認識合わせ）
+
+コード実装後に「本家 Clipy の動作イメージを確認したい」という観点で再整理。
+
+- Clipy に**検索機能は存在しない**ことを確認
+- UI は「OS 標準カスケードメニューのみ」
+- 当初設計の「カスタムポップアップウィンドウ＋検索」はオーバースペックと判断
+
+**UI 選択肢の整理:**
+
+| 選択肢 | 内容 |
+|--------|------|
+| A. Clipy 完全忠実 | 検索なし・カスケードメニューのみ |
+| B. 軽量ベース＋検索 1 行 | ネイティブメニュー＋検索ボックス 1 行 |
+
+→ 当初は **B** を選択（検索ありで進める方針）
+
+#### ④ Tauri の検討と WebView 問題の発見
+
+「軽量重視なら Tauri が良いのでは」という観点で Tauri を調査。
+
+**重大な発見:**
+
+```
+検索ボックス付きポップアップ = カスタムウィンドウ = WebView2 が起動
+→ メモリが 80〜120MB に膨れ上がる（軽量の目的と逆行）
+```
+
+**Tauri のメモリ構造を理解:**
+- トレイ＋ネイティブメニューのみ → WebView2 起動なし → 8〜15MB ✅
+- カスタムウィンドウを 1 枚でも開く → WebView2 起動 → +60〜80MB ⚠️（一時的）
+
+#### ⑤ 「検索なし」前提での再比較
+
+「検索なし」に絞ると WebView2 問題が消え、Tauri の選択肢が現実的になった。
+
+| | WinForms | Tauri（トレイのみ） |
+|--|---------|-------------------|
+| 常駐メモリ | 6〜8MB | 8〜15MB |
+| macOS 対応 | ❌ | ✅ |
+| 技術鮮度 | △ | ✅ |
+
+→ ほぼ同等の軽量性。macOS 対応と技術鮮度で Tauri に優位性あり。
+
+#### ⑥ Tauri vs Pure Rust の比較
+
+「Tauri か Pure Rust か」で比較。
+
+**Pure Rust の構成:** `tray-icon`（tauri-apps 製）+ `muda`（tauri-apps 製）+ `arboard` + `rusqlite`  
+※ Pure Rust = Tauri から WebView 層だけ抜いた構成に等しい
+
+| | Tauri | Pure Rust |
+|--|-------|---------|
+| 設定 UI の実装 | WebView（HTML）で容易 | ネイティブ GUI が未成熟で困難 |
+| フレームワーク | あり（構造が整っている） | なし（全部自前） |
+| 情報量 | 多い | 少ない（日本語ほぼなし） |
+| メモリ | 8〜15MB（アイドル時） | 3〜5MB |
+
+**Pure Rust の致命的な問題:** 設定画面・スニペット編集 UI を自前で作る必要があり、  
+Rust のネイティブ GUI ライブラリ（iced, egui）の成熟度が低く実装コストが過大。
+
+#### ⑦ 最終決定
+
+**Tauri v2（Rust バックエンド）を採用。検索は v1.0 スコープ外。**
+
+決定の根拠:
+1. 常駐メモリ 8〜15MB（非機能要件 20MB 以下を達成可能）
+2. 設定 UI を WebView（HTML/CSS）で実装できる（一時的な重さは許容）
+3. 将来の macOS 対応がコード流用で可能
+4. tauri-apps チームが `tray-icon`/`muda` も管理しており、エコシステムが一貫している
+5. 実績: Beetroot（同種アプリ）が Tauri v2 で 6MB インストーラーを達成
+
+---
+
+### 10-3. スコープの変遷
+
+| 項目 | 当初 | 最終 | 理由 |
+|------|------|------|------|
+| 検索ボックス | v1.0 に含む | **スコープ外** | Tauri でカスタムウィンドウを使うと重くなるため |
+| 画像対応 | スコープ外 | スコープ外 | 変わらず |
+| macOS 対応 | 将来検討 | **ゴールに明記** | Tauri 選定理由の 1 つなので明示 |
+
+---
+
+## 11. 開発環境セットアップ
+
+**対象 OS: Windows 10 / 11**（実行・テストは Windows 環境が必須）  
+コードの閲覧・編集は macOS でも可能だが、`cargo tauri dev` での動作確認は Windows が必要。
+
+---
+
+### 11-1. 必要なツール一覧
+
+| ツール | バージョン | 用途 |
+|--------|-----------|------|
+| Rust | 1.77 以上 (stable) | バックエンド実装言語 |
+| Node.js | 18 以上 LTS | Tauri CLI・フロントエンドビルド |
+| VS Build Tools | 2022 | Rust の Windows ビルドに必要 |
+| Git | 最新 | ソース管理 |
+| VS Code | 最新 | 推奨エディタ |
+
+---
+
+### 11-2. インストール手順（Windows）
+
+#### Step 1: Visual Studio Build Tools
+
+Rust のコンパイルに必要な C++ ビルドツールを先に入れる。
+
+```
+https://visualstudio.microsoft.com/visual-cpp-build-tools/
+```
+
+インストール時に **「C++ によるデスクトップ開発」** を選択。
+
+#### Step 2: Rust
+
+```powershell
+# rustup インストーラーをダウンロード・実行
+# https://rustup.rs/
+winget install Rustlang.Rustup
+
+# インストール確認
+rustc --version   # rustc 1.77.x 以上
+cargo --version
+```
+
+#### Step 3: Node.js
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+
+# 確認
+node --version   # v18.x 以上
+npm --version
+```
+
+#### Step 4: Tauri CLI
+
+```powershell
+cargo install tauri-cli --version "^2.0"
+
+# 確認
+cargo tauri --version   # tauri-cli 2.x
+```
+
+#### Step 5: VS Code 拡張機能（推奨）
+
+| 拡張機能 ID | 用途 |
+|------------|------|
+| `rust-lang.rust-analyzer` | Rust 補完・型チェック |
+| `tauri-apps.tauri-vscode` | Tauri サポート |
+| `esbenp.prettier-vscode` | フロントエンド整形 |
+
+---
+
+### 11-3. リポジトリのクローンと初回ビルド
+
+```powershell
+# リポジトリのクローン
+git clone https://github.com/tkpurine/clip-win.git
+cd clip-win
+
+# 依存パッケージのインストール（フロントエンド）
+npm install
+
+# 開発サーバー起動（初回は数分かかる）
+cargo tauri dev
+```
+
+> **注意:** 初回ビルドは Rust の依存クレートをすべてコンパイルするため  
+> 5〜10 分かかる場合がある。2 回目以降は差分のみでほぼ即時。
+
+---
+
+### 11-4. ディレクトリ構造の確認ポイント
+
+```
+clip-win/
+├── docs/design.md         ← この設計書
+├── src-tauri/             ← Rust バックエンド（ここがメイン）
+│   ├── Cargo.toml         ← Rust 依存クレート定義
+│   ├── tauri.conf.json    ← Tauri 設定（ウィンドウ・tray 設定）
+│   └── src/
+│       └── main.rs        ← エントリポイント
+└── src/                   ← フロントエンド（設定・スニペット UI）
+```
+
+---
+
+## 12. 次のアクション
+
+**現在のステータス:** 設計完了・実装未着手
+
+---
+
+### 12-1. Phase 1 着手前の準備チェックリスト
+
+新しい環境で再開する場合、まずこれを確認する。
+
+```
+[ ] git clone https://github.com/tkpurine/clip-win.git
+[ ] Rust stable インストール済み（rustc --version で確認）
+[ ] Node.js 18+ インストール済み（node --version で確認）
+[ ] Tauri CLI v2 インストール済み（cargo tauri --version で確認）
+[ ] VS Build Tools インストール済み（Windows のみ）
+```
+
+---
+
+### 12-2. Phase 1 の実装ステップ（具体的な順序）
+
+#### Step 1: Tauri v2 プロジェクト初期化
+
+```powershell
+# clip-win ディレクトリ内で実行
+# ※ 既存の README.md / docs/ を残しつつ Tauri プロジェクトを初期化する
+cargo create-tauri-app --template vanilla-ts --identifier com.clipwin.app
+```
+
+`tauri.conf.json` で以下を設定：
+```json
+{
+  "app": {
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "identifier": "com.clipwin.app",
+    "icon": ["icons/tray.png"]
+  },
+  "trayIcon": {
+    "iconPath": "icons/tray.png",
+    "iconAsTemplate": true
+  }
+}
+```
+
+#### Step 2: Cargo.toml に依存クレートを追加
+
+```toml
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+] }
+```
+
+#### Step 3: StorageService 実装（`src-tauri/src/core/storage.rs`）
+
+実装する関数:
+```rust
+pub fn new(db_path: &str) -> Result<Self>      // DB 初期化・マイグレーション
+pub fn add_history(&self, content: &str)       // 履歴追加（重複チェック込み）
+pub fn get_history(&self, limit: i64) -> Vec<ClipboardEntry>
+pub fn delete_history(&self, id: i64)
+pub fn clear_history(&self)                    // ピン留め以外を全削除
+pub fn toggle_pin(&self, id: i64)
+pub fn get_setting(&self, key: &str) -> Option<String>
+pub fn set_setting(&self, key: &str, value: &str)
+```
+
+#### Step 4: ClipboardWatcher 実装（`src-tauri/src/core/clipboard.rs`）
+
+- Windows: `AddClipboardFormatListener` + `WM_CLIPBOARDUPDATE` を受信するネイティブウィンドウを作成
+- 変更検出時に `StorageService::add_history()` を呼ぶ
+- **自アプリによる書き込みを無視するフラグ**（`is_writing` フラグ）を必ず実装すること  
+  → ペースト処理中の自己検知ループを防ぐため
+
+#### Step 5: TrayMenu 構築（`src-tauri/src/core/tray.rs`）
+
+```rust
+pub fn build_menu(history: &[ClipboardEntry], folders: &[SnippetFolder]) -> Menu
+pub fn rebuild_tray(app: &AppHandle)   // 履歴更新時に呼ぶ
+```
+
+メニュー構造:
+```
+MenuId("pin_{id}")  → ピン留めアイテム
+--- separator ---
+MenuId("hist_{id}") → 履歴アイテム（最大10件）
+MenuId("hist_all")  → 「すべて表示」サブメニュー
+--- separator ---
+MenuId("snip_root") → スニペットサブメニュー
+--- separator ---
+MenuId("open_snippets") → スニペット管理画面
+MenuId("open_settings") → 設定画面
+MenuId("quit")          → 終了
+```
+
+#### Step 6: 自動ペースト（`src-tauri/src/core/paste.rs`）
+
+```rust
+pub fn capture_foreground() -> HWND          // メニュー表示前に呼ぶ
+pub async fn paste_to(hwnd: HWND, text: &str) // クリップボードにセット→フォーカス戻し→Ctrl+V
+```
+
+#### Step 7: グローバルホットキー登録
+
+```rust
+// lib.rs の setup 内
+app.handle().plugin(
+  tauri_plugin_global_shortcut::Builder::new()
+    .with_shortcut("Ctrl+Shift+V")?
+    .with_handler(|app, shortcut, event| {
+      if event.state == ShortcutState::Pressed {
+        // トレイメニューを表示
+      }
+    })
+    .build()
+)?;
+```
+
+---
+
+### 12-3. Phase 1 完了の確認方法
+
+以下の動作が Windows 上で確認できれば Phase 1 完了。
+
+```
+1. アプリ起動 → タスクトレイにアイコンが表示される
+2. 任意のテキストをコピー → トレイアイコン右クリックでメニューに追加されている
+3. Ctrl+Shift+V を押す → トレイメニューが表示される
+4. メニューの履歴アイテムをクリック → テキストエディタ等にペーストされる
+5. アプリ終了 → 再起動後も履歴が復元されている（SQLite 永続化の確認）
+```
+
+---
+
+### 12-4. 既知の実装上の注意点
+
+| 注意点 | 詳細 |
+|--------|------|
+| クリップボード書き込みループ | ペースト時に自アプリの `ClipboardWatcher` が反応しないよう `is_writing` フラグで抑制する |
+| トレイメニューの再構築コスト | 履歴が変わるたびに `rebuild_tray()` を呼ぶが、高頻度コピー時にちらつく可能性がある。デバウンス（200ms）を検討 |
+| Win32 メッセージループ | `ClipboardWatcher` 用のネイティブウィンドウは専用スレッドで動かす。Tauri のメインスレッドをブロックしないこと |
+| 前ウィンドウの記憶 | `capture_foreground()` はメニューを**表示する直前**に呼ぶ。表示後に呼ぶと clip-win 自身が前ウィンドウになる |
+| SQLite のスレッド安全性 | `rusqlite` はデフォルトでスレッドセーフでないため `Mutex<Connection>` でラップして `AppState` に持たせる |
