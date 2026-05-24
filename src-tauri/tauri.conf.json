@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "clip-win",
+  "version": "0.1.0",
+  "identifier": "com.clipwin.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "hotkey-trigger",
+        "width": 1,
+        "height": 1,
+        "x": -200,
+        "y": -200,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "title": ""
+      },
+      {
+        "label": "settings",
+        "url": "/",
+        "width": 400,
+        "height": 320,
+        "resizable": false,
+        "visible": false,
+        "skipTaskbar": false,
+        "title": "設定 — clip-win"
+      },
+      {
+        "label": "snippets",
+        "url": "/",
+        "width": 640,
+        "height": 480,
+        "resizable": true,
+        "visible": false,
+        "skipTaskbar": false,
+        "title": "スニペット管理 — clip-win"
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
