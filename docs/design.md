@@ -1,6 +1,6 @@
 # clip-win 設計書
 
-**バージョン**: 3.0
+**バージョン**: 4.0
 **作成日**: 2026-05-23
 **更新日**: 2026-05-24
 **ステータス**: Ready for Implementation
@@ -113,11 +113,13 @@ UI に `NSMenu`（OS 標準カスケードメニュー）をそのまま使っ�
 | フレームワーク | **Tauri v2** |
 | バックエンド言語 | **Rust** |
 | メインメニュー UI | **ネイティブトレイメニュー**（OS が描画、WebView 不使用） |
-| 設定・スニペット UI | **WebView ウィンドウ**（HTML/CSS、開いた時のみ起動） |
-| DB | **SQLite**（`tauri-plugin-sql` + `rusqlite`） |
-| クリップボード監視 | `tauri-plugin-clipboard-manager` + Win32 `WM_CLIPBOARDUPDATE` |
+| 設定・スニペット UI | **Svelte**（WebView ウィンドウ、開いた時のみ起動） |
+| DB | **SQLite**（`rusqlite`） |
+| クリップボード監視 | Win32 `WM_CLIPBOARDUPDATE` |
 | グローバルホットキー | `tauri-plugin-global-shortcut` |
-| 多言語 | Rust の `rust-i18n` クレート |
+| ホットキー→メニュー表示 | **非表示ウィンドウ方式**（1×1px 透明ウィンドウ経由） |
+| 履歴アイテム操作 | **サブメニュー方式**（貼り付け / ピン留め / 削除） |
+| 多言語 | `rust-i18n` クレート |
 
 ---
 
@@ -231,17 +233,31 @@ Pure Rust で作る場合 = tray-icon + muda を直接使う = Tauri から wry 
 
 ### 3-3. 依存クレート一覧
 
+> **プロジェクト初期化テンプレート:** `cargo create-tauri-app --template svelte-ts`  
+> （設定・スニペット UI を Svelte で実装するため `svelte-ts` を使用）
+
 ```toml
 [dependencies]
-tauri            = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-sql = { version = "2", features = ["sqlite"] }
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-global-shortcut   = "2"
-rust-i18n = "3"
-serde     = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio     = { version = "1", features = ["full"] }
+tauri                        = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+rusqlite                     = { version = "0.31", features = ["bundled"] }
+rust-i18n                    = "3"
+serde                        = { version = "1", features = ["derive"] }
+serde_json                   = "1"
+tokio                        = { version = "1", features = ["full"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+] }
 ```
+
+> **選定理由（SQLite）:** `tauri-plugin-sql` 経由ではなく `rusqlite` を直接使用する。  
+> フロントエンドから DB を触る必要はなく（Rust 側で完結）、  
+> Tauri プラグイン経由にすると不要な IPC 往復が増えるため。
 
 ---
 
@@ -323,36 +339,40 @@ tokio     = { version = "1", features = ["full"] }
 **WebView を一切使わない OS ネイティブメニュー**で描画する。
 
 ```
-┌────────────────────────────────────┐
-│ 📌 ピン留めされたテキスト          │  ← ピン留め（上部固定）
-├────────────────────────────────────┤
-│ Hello, World!                      │  ← 履歴アイテム（最新順）
-│ foo@example.com                    │    クリックで即ペースト
-│ https://github.com/...             │    右クリック → コンテキストメニュー
-│ お疲れ様です                       │
-│   ：（最大10件）                   │
-├────────────────────────────────────┤
-│ 履歴をすべて表示           ▶       │  ← サブメニューで全件
-├────────────────────────────────────┤
-│ スニペット                 ▶       │
-│   ├ [📁 挨拶文]            ▶       │
-│   │    ├ こんにちは                │
-│   │    └ お疲れ様です             │
-│   └ [📁 定型文]            ▶       │
-├────────────────────────────────────┤
-│ スニペットを編集...                │
-│ 設定...                            │
-│ 終了                               │
-└────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│ 📌 ピン留めされたテキスト          ▶     │  ← ピン留め（上部固定）
+├──────────────────────────────────────────┤
+│ Hello, World!                      ▶     │  ← 履歴アイテム（最新順）
+│ foo@example.com                    ▶     │    ▶ ホバーでサブメニュー
+│ https://github.com/...             ▶     │
+│ お疲れ様です                       ▶     │
+│   ：（最大10件）                         │
+├──────────────────────────────────────────┤
+│ 履歴をすべて表示                   ▶     │  ← サブメニューで全件
+├──────────────────────────────────────────┤
+│ スニペット                         ▶     │
+│   ├ [📁 挨拶文]                    ▶     │
+│   │    ├ こんにちは                      │
+│   │    └ お疲れ様です                   │
+│   └ [📁 定型文]                    ▶     │
+├──────────────────────────────────────────┤
+│ スニペットを編集...                      │
+│ 設定...                                  │
+│ 終了                                     │
+└──────────────────────────────────────────┘
 ```
 
-### 5-2. 右クリックコンテキストメニュー（履歴アイテム）
+### 5-2. 履歴アイテムのサブメニュー（ホバーで展開）
+
+> **設計変更:** Tauri v2 のネイティブトレイメニューはアイテムへの右クリックを  
+> サポートしないため、サブメニュー方式を採用する。
 
 ```
-┌────────────────────┐
-│ 📌 ピン留め / 解除 │
-│ 🗑 削除            │
-└────────────────────┘
+│ Hello, World!    ▶ │ ─→ ┌──────────────────────┐
+│                    │    │ 📋 貼り付け            │ ← デフォルト（左クリックと同じ）
+│                    │    │ 📌 ピン留め / 解除     │
+│                    │    │ 🗑  削除               │
+│                    │    └──────────────────────┘
 ```
 
 ### 5-3. トレイアイコン右クリック
@@ -502,9 +522,14 @@ clip-win/
 │   └── icons/
 │       └── tray.png
 │
-└── src/                            設定・スニペット管理 UI（HTML/CSS/TS）
+└── src/                            設定・スニペット管理 UI（Svelte）
+    ├── app.css                     グローバルスタイル
+    ├── lib/
+    │   └── api.ts                  Tauri invoke ラッパー（型付き）
     ├── settings/
+    │   └── Settings.svelte         設定ウィンドウのルートコンポーネント
     └── snippets/
+        └── Snippets.svelte         スニペット管理ウィンドウのルートコンポーネント
 ```
 
 ### 各モジュールの責務
@@ -898,7 +923,8 @@ clip-win/
 ```powershell
 # clip-win ディレクトリ内で実行
 # ※ 既存の README.md / docs/ を残しつつ Tauri プロジェクトを初期化する
-cargo create-tauri-app --template vanilla-ts --identifier com.clipwin.app
+# svelte-ts テンプレートを使用（設定・スニペット UI を Svelte で実装するため）
+cargo create-tauri-app --template svelte-ts --identifier com.clipwin.app
 ```
 
 `tauri.conf.json` で以下を設定：
@@ -987,21 +1013,73 @@ pub fn capture_foreground() -> HWND          // メニュー表示前に呼ぶ
 pub async fn paste_to(hwnd: HWND, text: &str) // クリップボードにセット→フォーカス戻し→Ctrl+V
 ```
 
-#### Step 7: グローバルホットキー登録
+#### Step 7: グローバルホットキー登録と非表示ウィンドウ方式
+
+> **背景:** Tauri v2 のネイティブトレイメニューは「トレイアイコンのクリック」か  
+> 「ウィンドウへのイベント送信」でしか表示できない。  
+> ホットキー→メニュー表示を実現するには **非表示ウィンドウ方式** を使う。
+
+**仕組み:**
+
+```
+Ctrl+Shift+V 押下
+  → tauri-plugin-global-shortcut がイベント発火
+  → 1×1px の透明ウィンドウ（clip-win-hotkey）を一時的に表示
+  → Tauri がウィンドウにフォーカスを当てる
+  → そのウィンドウ上でトレイメニューを呼び出す
+  → メニューが表示される
+  → メニューを閉じると非表示ウィンドウも即非表示に戻る
+```
+
+**`tauri.conf.json` に非表示ウィンドウを定義:**
+
+```json
+{
+  "app": {
+    "windows": [
+      {
+        "label": "hotkey-trigger",
+        "width": 1,
+        "height": 1,
+        "x": -100,
+        "y": -100,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      }
+    ]
+  }
+}
+```
+
+**`lib.rs` のホットキー登録:**
 
 ```rust
 // lib.rs の setup 内
 app.handle().plugin(
   tauri_plugin_global_shortcut::Builder::new()
     .with_shortcut("Ctrl+Shift+V")?
-    .with_handler(|app, shortcut, event| {
+    .with_handler(|app, _shortcut, event| {
       if event.state == ShortcutState::Pressed {
-        // トレイメニューを表示
+        // 前のウィンドウを記憶してからメニューを表示
+        capture_foreground();
+        // 非表示ウィンドウを一瞬前面に出してトレイメニューを表示
+        if let Some(win) = app.get_webview_window("hotkey-trigger") {
+          let _ = win.show();
+          rebuild_tray(app);          // 最新の履歴でメニューを更新
+          // tray メニュー表示後、ウィンドウを即非表示に戻す
+          let _ = win.hide();
+        }
       }
     })
     .build()
 )?;
 ```
+
+> **注意:** `capture_foreground()` は必ずウィンドウを表示する **前** に呼ぶこと。  
+> 表示後に呼ぶと clip-win 自身が「前のウィンドウ」として記録されてしまう。
 
 ---
 
