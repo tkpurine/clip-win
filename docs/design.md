@@ -581,14 +581,15 @@ clip-win/
 ### Phase 1 — コア動作（MVP）
 **目標**: コピー → ホットキー → クリック → ペーストが動く
 
-- [ ] Tauri v2 プロジェクトセットアップ
-- [ ] `StorageService`：DB 初期化・履歴 CRUD
-- [ ] `ClipboardWatcher`：Windows クリップボード監視・自動記録
-- [ ] `tray.rs`：履歴アイテムをネイティブトレイメニューで表示
-- [ ] `paste.rs`：アイテム選択 → 元ウィンドウへ自動ペースト
-- [ ] グローバルホットキー（`tauri-plugin-global-shortcut`）
+- [x] Tauri v2 プロジェクトセットアップ
+- [x] `StorageService`：DB 初期化・履歴 CRUD
+- [x] `ClipboardWatcher`：Windows クリップボード監視・自動記録
+- [x] `tray.rs`：履歴アイテムをネイティブトレイメニューで表示
+- [x] `paste.rs`：アイテム選択 → 元ウィンドウへ自動ペースト
+- [x] グローバルホットキー（`tauri-plugin-global-shortcut`）
 
 **完了基準**: コピー→ホットキー→クリック→ペーストの一連が動作する
+**実装ステータス**: コード実装完了（2026-05-24）。Windows 環境での動作確認が必要。
 
 ---
 
