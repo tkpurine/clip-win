@@ -2,12 +2,13 @@
 ///
 /// AppState の定義と Tauri アプリのセットアップを担う。
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::AtomicBool,
     Arc, Mutex,
 };
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_log::{Target, TargetKind};
 
 pub mod commands;
 pub mod core;
@@ -31,7 +32,7 @@ pub struct AppState {
     /// ホットキー押下直前のフォアグラウンドウィンドウハンドル（isize で保持）
     pub prev_hwnd: Mutex<isize>,
 
-    /// 現在のトレイメニュー（ホットキーによる popup 表示に使う）
+    /// 現在のトレイメニュー（トレイアイコン右クリック用）
     pub tray_menu: Mutex<Option<tauri::menu::Menu<tauri::Wry>>>,
 }
 
@@ -42,7 +43,22 @@ pub struct AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // ログプラグイン: デバッグビルドはコンソール、リリースビルドはファイルに出力
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir { file_name: Some("clip-win".into()) }),
+                ])
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .build(),
+        )
+        // NOTE: global-shortcut プラグインは setup_app 内で .with_handler() 付きで
+        //       一度だけ登録する。ここでの事前登録は二重登録エラーになるため不要。
         .setup(|app| {
             setup_app(app)?;
             Ok(())
@@ -100,7 +116,7 @@ fn setup_app(app: &mut tauri::App) -> tauri::Result<()> {
         app.handle().clone(),
     );
 
-    // ── 5. グローバルホットキーを登録 ─────────────────────────────────
+    // ── 5. グローバルホットキーを登録（ここで1度だけ登録する）────────
     let hotkey_str = app
         .state::<AppState>()
         .storage
@@ -133,8 +149,9 @@ fn setup_app(app: &mut tauri::App) -> tauri::Result<()> {
 /// 1. `capture_foreground()` を **ウィンドウ表示前** に呼ぶ
 ///    → 表示後に呼ぶと clip-win 自身が「前のウィンドウ」になってしまう
 /// 2. hotkey-trigger ウィンドウを表示してフォーカスを確保
-/// 3. 最新の履歴でメニューを再構築
-/// 4. メニューを popup で表示（blocking なので別スレッドで実行）
+/// 3. メニューをその場で構築（rebuild_tray に依存しない → 確実に最新データ）
+/// 4. menu.popup() でメニューを表示（Windows では blocking）
+/// 5. popup が閉じたら hotkey-trigger を非表示に戻す
 fn on_hotkey_pressed(app: &AppHandle) {
     // 1. 前のフォアグラウンドウィンドウを記憶
     let prev_hwnd = crate::core::paste::capture_foreground();
@@ -152,22 +169,38 @@ fn on_hotkey_pressed(app: &AppHandle) {
             let _ = win.set_focus();
         }
 
-        // 3. 最新の履歴でメニューを再構築
-        crate::core::tray::rebuild_tray(&app_clone);
-
-        // 4. メニューを popup で表示（Windows では blocking）
+        // 3. 最新の履歴でメニューをその場で構築
+        //    rebuild_tray() は run_on_main_thread で非同期なため、
+        //    ここで直接構築することで確実に最新データを表示する。
         let state = app_clone.state::<AppState>();
-        let menu_guard = state.tray_menu.lock().unwrap();
-        if let Some(menu) = menu_guard.as_ref() {
-            if let Some(win) = &trigger_win {
-                if let Err(e) = menu.popup(win.clone()) {
-                    log::warn!("メニューの表示に失敗しました: {}", e);
+        let display_count = state
+            .storage
+            .get_setting("menu_display_count")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(10);
+        let history = state.storage.get_history(display_count + 50);
+
+        match crate::core::tray::build_menu(&app_clone, &history) {
+            Ok(menu) => {
+                // tray_menu にも保存しておく（右クリックトレイ表示に使う）
+                *state.tray_menu.lock().unwrap() = Some(menu.clone());
+                if let Some(tray) = app_clone.tray_by_id("main") {
+                    let _ = tray.set_menu(Some(&menu));
+                }
+
+                // 4. popup 表示（blocking: メニューが閉じるまで戻らない）
+                if let Some(win) = &trigger_win {
+                    if let Err(e) = menu.popup(win.clone()) {
+                        log::warn!("メニューの表示に失敗しました: {}", e);
+                    }
                 }
             }
+            Err(e) => {
+                log::warn!("ホットキー用メニューの構築に失敗しました: {}", e);
+            }
         }
-        drop(menu_guard);
 
-        // 5. popup が閉じた後（popup は blocking）、ウィンドウを再非表示にする
+        // 5. popup が閉じた後、ウィンドウを非表示に戻す
         if let Some(win) = &trigger_win {
             let _ = win.hide();
         }

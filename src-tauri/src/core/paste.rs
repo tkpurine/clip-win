@@ -46,7 +46,12 @@ pub fn capture_foreground() -> isize {
 /// - `hwnd`: 元のフォアグラウンドウィンドウのハンドル（`capture_foreground()` の戻り値）
 /// - `text`: ペーストするテキスト
 /// - `is_writing`: ClipboardWatcher の自己検知抑制フラグ
-pub async fn paste_to(hwnd: isize, text: &str, is_writing: Arc<AtomicBool>) {
+pub async fn paste_to(
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    hwnd: isize,
+    text: &str,
+    is_writing: Arc<AtomicBool>,
+) {
     // 1. 書き込みフラグを立てる（ClipboardWatcher が無視するようにする）
     is_writing.store(true, Ordering::SeqCst);
 

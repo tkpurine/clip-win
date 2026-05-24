@@ -2,11 +2,15 @@
 ///
 /// # MenuId 命名規則
 /// ```
-/// hist_paste_{id}      履歴アイテム（クリックで即ペースト）
-/// hist_sub_{id}_paste  サブメニュー: 貼り付け
-/// hist_sub_{id}_pin    サブメニュー: ピン留め / 解除
-/// hist_sub_{id}_del    サブメニュー: 削除
-/// pin_paste_{id}       ピン留めアイテム（クリックで即ペースト）
+/// hist_sub_{id}_paste  履歴サブメニュー: 貼り付け
+/// hist_sub_{id}_pin    履歴サブメニュー: ピン留め / 解除
+/// hist_sub_{id}_del    履歴サブメニュー: 削除
+/// pin_sub_{id}_paste   ピン留めサブメニュー: 貼り付け
+/// pin_sub_{id}_pin     ピン留めサブメニュー: ピン留め解除
+/// pin_sub_{id}_del     ピン留めサブメニュー: 削除
+/// all_sub_{id}_paste   「すべての履歴」内サブメニュー: 貼り付け
+/// all_sub_{id}_pin     「すべての履歴」内サブメニュー: ピン留め
+/// all_sub_{id}_del     「すべての履歴」内サブメニュー: 削除
 /// clear_history        履歴をすべて削除
 /// open_settings        設定画面を開く
 /// quit                 終了
@@ -20,7 +24,7 @@ use tauri::{
 
 use crate::models::clipboard_entry::ClipboardEntry;
 
-/// Phase 1 で表示する最大文字数
+/// メニューアイテムのタイトル最大文字数
 const ITEM_DISPLAY_LEN: usize = 40;
 
 // ============================================================================
@@ -29,24 +33,20 @@ const ITEM_DISPLAY_LEN: usize = 40;
 
 /// トレイアイコンを初期化する（アプリ起動時に 1 度呼ぶ）。
 pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    // アイコン画像を埋め込み読み込み
     let icon = Image::from_bytes(include_bytes!("../../icons/icon.png"))
         .expect("トレイアイコンの読み込みに失敗しました");
 
-    // 初期メニューを構築
     let state = app.state::<crate::AppState>();
     let display_count = state
         .storage
         .get_setting("menu_display_count")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(10);
-    let history = state.storage.get_history(display_count + 50); // ピン留め分を余分に取得
+    let history = state.storage.get_history(display_count + 50);
     let menu = build_menu(app, &history)?;
 
-    // メニューを AppState に保存（ホットキー時の popup に使う）
     *state.tray_menu.lock().unwrap() = Some(menu.clone());
 
-    // トレイアイコンを作成
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true)
@@ -65,7 +65,11 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 // メニュー構築
 // ============================================================================
 
-/// 現在の履歴・スニペットからネイティブメニューを構築する。
+/// 現在の履歴からネイティブメニューを構築する。
+///
+/// ## MenuId の重複を防ぐ設計
+/// - メインメニューの履歴アイテム: `hist_sub_{id}_*` / `pin_sub_{id}_*`
+/// - 「すべての履歴」内のアイテム: `all_sub_{id}_*`（別プレフィックスで重複回避）
 pub fn build_menu(app: &AppHandle, history: &[ClipboardEntry]) -> tauri::Result<Menu<tauri::Wry>> {
     let pinned: Vec<&ClipboardEntry> = history.iter().filter(|e| e.is_pinned).collect();
     let unpinned: Vec<&ClipboardEntry> = history.iter().filter(|e| !e.is_pinned).collect();
@@ -81,26 +85,26 @@ pub fn build_menu(app: &AppHandle, history: &[ClipboardEntry]) -> tauri::Result<
 
     // ── ピン留めアイテム ──────────────────────────────────────────────
     for entry in &pinned {
-        let title = format!("📌 {}", entry.display_title(ITEM_DISPLAY_LEN));
-        let submenu = build_item_submenu(app, entry, true)?;
+        let submenu = build_item_submenu(app, entry, "pin")?;
         builder = builder.item(&submenu);
     }
-
     if !pinned.is_empty() {
         builder = builder.separator();
     }
 
     // ── 通常履歴アイテム（最大 display_count 件）────────────────────
-    let visible = unpinned.iter().take(display_count);
-    for entry in visible {
-        let submenu = build_item_submenu(app, entry, false)?;
+    for entry in unpinned.iter().take(display_count) {
+        let submenu = build_item_submenu(app, entry, "hist")?;
         builder = builder.item(&submenu);
     }
 
-    // 件数が display_count を超える場合「すべて表示」サブメニューを追加
+    // overflow 分を「すべての履歴を表示」サブメニューに追加
+    // ※ 既にメインに表示された上位 display_count 件とは別プレフィックス "all" を使い
+    //   同一 Menu 内での MenuId 重複を防ぐ。
     if unpinned.len() > display_count {
+        let overflow = &unpinned[display_count..];
         builder = builder.separator();
-        let all_menu = build_all_history_submenu(app, &unpinned)?;
+        let all_menu = build_overflow_submenu(app, overflow)?;
         builder = builder.item(&all_menu);
     }
 
@@ -137,14 +141,23 @@ pub fn build_menu(app: &AppHandle, history: &[ClipboardEntry]) -> tauri::Result<
 }
 
 /// 履歴アイテム 1 件分のサブメニューを構築する。
-/// ▶ ホバーで「貼り付け / ピン留め / 削除」を表示。
+///
+/// - `prefix`: `"hist"` / `"pin"` / `"all"` — MenuId のプレフィックス
+/// - タイトルはピン留め時に 📌 を先頭に付ける
 fn build_item_submenu(
     app: &AppHandle,
     entry: &ClipboardEntry,
-    is_pinned: bool,
+    prefix: &str,
 ) -> tauri::Result<Submenu<tauri::Wry>> {
-    let prefix = if is_pinned { "pin" } else { "hist" };
-    let title = entry.display_title(ITEM_DISPLAY_LEN);
+    // サブメニューのタイトル（ピン留めには 📌 プレフィックスを付ける）
+    let title = if prefix == "pin" {
+        format!("📌 {}", entry.display_title(ITEM_DISPLAY_LEN))
+    } else {
+        entry.display_title(ITEM_DISPLAY_LEN)
+    };
+
+    let is_pinned = prefix == "pin";
+    let pin_label = if is_pinned { "📌 ピン留め解除" } else { "📌 ピン留め" };
 
     let paste_item = MenuItem::with_id(
         app,
@@ -153,11 +166,6 @@ fn build_item_submenu(
         true,
         None::<&str>,
     )?;
-    let pin_label = if is_pinned {
-        "📌 ピン留め解除"
-    } else {
-        "📌 ピン留め"
-    };
     let pin_item = MenuItem::with_id(
         app,
         format!("{}_sub_{}_pin", prefix, entry.id),
@@ -180,14 +188,17 @@ fn build_item_submenu(
         .build()
 }
 
-/// 「すべての履歴」サブメニューを構築する。
-fn build_all_history_submenu(
+/// 「すべての履歴を表示」サブメニューを構築する。
+///
+/// メインメニューに表示できなかった overflow 分のみを受け取る。
+/// prefix "all" を使い、メインメニューの "hist" と ID が重複しないようにする。
+fn build_overflow_submenu(
     app: &AppHandle,
-    unpinned: &[&ClipboardEntry],
+    overflow: &[&ClipboardEntry],
 ) -> tauri::Result<Submenu<tauri::Wry>> {
     let mut builder = SubmenuBuilder::new(app, "すべての履歴を表示");
-    for entry in unpinned {
-        let submenu = build_item_submenu(app, entry, false)?;
+    for entry in overflow {
+        let submenu = build_item_submenu(app, entry, "all")?;
         builder = builder.item(&submenu);
     }
     builder.build()
@@ -208,14 +219,11 @@ pub fn rebuild_tray(app: &AppHandle) {
             .get_setting("menu_display_count")
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(10);
-
         let history = state.storage.get_history(display_count + 50);
 
         match build_menu(&app_clone, &history) {
             Ok(new_menu) => {
-                // AppState に保存
                 *state.tray_menu.lock().unwrap() = Some(new_menu.clone());
-                // トレイアイコンのメニューを更新
                 if let Some(tray) = app_clone.tray_by_id("main") {
                     if let Err(e) = tray.set_menu(Some(&new_menu)) {
                         log::warn!("トレイメニューの更新に失敗しました: {}", e);
@@ -233,39 +241,43 @@ pub fn rebuild_tray(app: &AppHandle) {
 // メニューイベント処理
 // ============================================================================
 
-/// メニューイベントを処理する。
-/// `on_menu_event` ハンドラから呼ぶ。
+/// メニューイベントを処理する。`on_menu_event` ハンドラから呼ぶ。
 pub fn handle_menu_event(app: &AppHandle, id: &str) {
     log::debug!("メニューイベント: {}", id);
 
-    if id == "quit" {
-        app.exit(0);
-        return;
-    }
-
-    if id == "clear_history" {
-        let state = app.state::<crate::AppState>();
-        if let Err(e) = state.storage.clear_history() {
-            log::warn!("履歴の削除に失敗しました: {}", e);
+    match id {
+        "quit" => {
+            app.exit(0);
         }
-        rebuild_tray(app);
-        return;
-    }
-
-    if id == "open_settings" {
-        if let Some(win) = app.get_webview_window("settings") {
-            let _ = win.show();
-            let _ = win.set_focus();
+        "clear_history" => {
+            let state = app.state::<crate::AppState>();
+            if let Err(e) = state.storage.clear_history() {
+                log::warn!("履歴の削除に失敗しました: {}", e);
+            }
+            rebuild_tray(app);
         }
-        return;
-    }
-
-    // hist_sub_{id}_paste / hist_sub_{id}_pin / hist_sub_{id}_del
-    if let Some(rest) = id.strip_prefix("hist_sub_").or_else(|| id.strip_prefix("pin_sub_")) {
-        // rest = "42_paste" / "42_pin" / "42_del"
-        if let Some((id_str, action)) = rest.split_once('_') {
-            if let Ok(entry_id) = id_str.parse::<i64>() {
-                handle_entry_action(app, entry_id, action);
+        "open_settings" => {
+            if let Some(win) = app.get_webview_window("settings") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }
+        _ => {
+            // hist_sub_{id}_{action}  — メインメニューの履歴アイテム
+            // pin_sub_{id}_{action}   — ピン留めアイテム
+            // all_sub_{id}_{action}   — 「すべての履歴」内アイテム
+            // いずれも {prefix}_sub_{entry_id}_{action} の形式
+            if let Some(rest) = id
+                .strip_prefix("hist_sub_")
+                .or_else(|| id.strip_prefix("pin_sub_"))
+                .or_else(|| id.strip_prefix("all_sub_"))
+            {
+                // rest = "{entry_id}_{action}"
+                if let Some((id_str, action)) = rest.split_once('_') {
+                    if let Ok(entry_id) = id_str.parse::<i64>() {
+                        handle_entry_action(app, entry_id, action);
+                    }
+                }
             }
         }
     }
@@ -277,18 +289,14 @@ fn handle_entry_action(app: &AppHandle, entry_id: i64, action: &str) {
 
     match action {
         "paste" => {
-            // 対象エントリのテキストを取得してペースト
             let history = state.storage.get_history(200);
             if let Some(entry) = history.into_iter().find(|e| e.id == entry_id) {
                 let text = entry.content.clone();
                 let is_writing = state.is_writing.clone();
                 let prev_hwnd = *state.prev_hwnd.lock().unwrap();
-                let app_clone = app.clone();
 
                 tauri::async_runtime::spawn(async move {
                     crate::core::paste::paste_to(prev_hwnd, &text, is_writing).await;
-                    // ペースト後にメニューを更新（必要であれば）
-                    // rebuild_tray(&app_clone);
                 });
             }
         }

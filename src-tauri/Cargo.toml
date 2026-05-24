@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri                        = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-log             = "2"
 rusqlite                     = { version = "0.31", features = ["bundled"] }
 arboard                      = "3"
 enigo                        = "0.2"
