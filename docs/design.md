@@ -1,6 +1,6 @@
 # clip-win 設計書
 
-**バージョン**: 4.0
+**バージョン**: 4.1
 **作成日**: 2026-05-23
 **更新日**: 2026-05-24
 **ステータス**: Ready for Implementation
@@ -242,6 +242,7 @@ tauri                        = { version = "2", features = ["tray-icon", "image-
 tauri-plugin-global-shortcut = "2"
 rusqlite                     = { version = "0.31", features = ["bundled"] }
 rust-i18n                    = "3"
+enigo                        = "0.2"
 serde                        = { version = "1", features = ["derive"] }
 serde_json                   = "1"
 tokio                        = { version = "1", features = ["full"] }
@@ -258,6 +259,10 @@ windows = { version = "0.58", features = [
 > **選定理由（SQLite）:** `tauri-plugin-sql` 経由ではなく `rusqlite` を直接使用する。  
 > フロントエンドから DB を触る必要はなく（Rust 側で完結）、  
 > Tauri プラグイン経由にすると不要な IPC 往復が増えるため。
+>
+> **`enigo` の役割:** 元ウィンドウへフォーカスを戻した後の `Ctrl+V` 送信に使用。  
+> Win32 `SendInput` を Rust から直接叩く代替実装も可能だが、  
+> クロスプラットフォーム対応と実装コスト削減のため `enigo` を採用する。
 
 ---
 
@@ -593,7 +598,7 @@ clip-win/
 - [ ] スニペット CRUD（DB + Tauri コマンド）
 - [ ] トレイメニューにスニペットサブメニューを追加
 - [ ] ピン留め機能（上部固定）
-- [ ] 右クリックコンテキストメニュー（ピン留め・削除）
+- [ ] 履歴アイテムのサブメニュー（貼り付け / ピン留め / 削除）を実装
 - [ ] 履歴上限・重複排除のロジック
 
 **完了基準**: 全機能要件 F01〜F13 を満たす
@@ -944,16 +949,44 @@ cargo create-tauri-app --template svelte-ts --identifier com.clipwin.app
 }
 ```
 
+#### Step 1b: Tauri v2 ケイパビリティ設定
+
+> **Tauri v2 の重要な変更点:** v2 では機能ごとに `capabilities/default.json` で  
+> 権限を明示的に許可しないとランタイムエラーになる。初期化直後に設定すること。
+
+`src-tauri/capabilities/default.json` を以下の内容で作成（または上書き）：
+
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main", "hotkey-trigger", "settings", "snippets"],
+  "permissions": [
+    "core:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered"
+  ]
+}
+```
+
+> **注意:** `"windows"` に全ウィンドウラベルを列挙しないと、  
+> そのウィンドウから `invoke()` を呼んでも権限エラーになる。
+
+---
+
 #### Step 2: Cargo.toml に依存クレートを追加
 
 ```toml
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri                        = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2"
-rusqlite = { version = "0.31", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+rusqlite                     = { version = "0.31", features = ["bundled"] }
+enigo                        = "0.2"
+serde                        = { version = "1", features = ["derive"] }
+serde_json                   = "1"
+tokio                        = { version = "1", features = ["full"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -985,6 +1018,35 @@ pub fn set_setting(&self, key: &str, value: &str)
 - **自アプリによる書き込みを無視するフラグ**（`is_writing` フラグ）を必ず実装すること  
   → ペースト処理中の自己検知ループを防ぐため
 
+**`is_writing` フラグのスレッド安全な実装:**
+
+```rust
+// AppState に持たせる（ClipboardWatcher と paste.rs が共有する）
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+pub struct AppState {
+    pub storage:    Mutex<StorageService>,
+    pub is_writing: Arc<AtomicBool>,         // ← これ
+}
+
+// paste.rs 側：ペースト前後でフラグを立てる
+pub async fn paste_to(hwnd: HWND, text: &str, is_writing: Arc<AtomicBool>) {
+    is_writing.store(true, Ordering::SeqCst);
+    // クリップボードに text をセット → Ctrl+V 送信
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    is_writing.store(false, Ordering::SeqCst);
+}
+
+// clipboard.rs 側：フラグが立っていれば無視
+fn on_clipboard_changed(is_writing: &Arc<AtomicBool>) {
+    if is_writing.load(Ordering::SeqCst) { return; }
+    // 通常の履歴記録処理
+}
+```
+
+> **注意:** `Mutex<bool>` ではなく `AtomicBool` を使う。  
+> クリップボード監視スレッドからロック取得を待つとイベント取りこぼしが起きるため。
+
 #### Step 5: TrayMenu 構築（`src-tauri/src/core/tray.rs`）
 
 ```rust
@@ -992,25 +1054,86 @@ pub fn build_menu(history: &[ClipboardEntry], folders: &[SnippetFolder]) -> Menu
 pub fn rebuild_tray(app: &AppHandle)   // 履歴更新時に呼ぶ
 ```
 
-メニュー構造:
+**MenuId 命名規則:**
+
+アイテムのクリックイベントでどのエントリ・どの操作かを識別するため、  
+MenuId に `{アクション}_{id}` の形式を使う。
+
 ```
-MenuId("pin_{id}")  → ピン留めアイテム
---- separator ---
-MenuId("hist_{id}") → 履歴アイテム（最大10件）
-MenuId("hist_all")  → 「すべて表示」サブメニュー
---- separator ---
-MenuId("snip_root") → スニペットサブメニュー
---- separator ---
-MenuId("open_snippets") → スニペット管理画面
-MenuId("open_settings") → 設定画面
-MenuId("quit")          → 終了
+# 履歴アイテム本体（クリックで即ペースト）
+MenuId("hist_paste_{id}")     例: "hist_paste_42"
+
+# 履歴アイテムのサブメニュー項目
+MenuId("hist_sub_{id}_paste") 例: "hist_sub_42_paste"  ← 貼り付け
+MenuId("hist_sub_{id}_pin")   例: "hist_sub_42_pin"    ← ピン留め / 解除
+MenuId("hist_sub_{id}_del")   例: "hist_sub_42_del"    ← 削除
+
+# ピン留めアイテム（同じ規則）
+MenuId("pin_paste_{id}")
+MenuId("pin_sub_{id}_paste")
+MenuId("pin_sub_{id}_pin")
+MenuId("pin_sub_{id}_del")
+
+# その他
+MenuId("hist_all")            → 「すべて表示」サブメニューのルート
+MenuId("snip_{id}")           → スニペットアイテム
+MenuId("open_snippets")       → スニペット管理画面
+MenuId("open_settings")       → 設定画面
+MenuId("quit")                → 終了
+```
+
+**イベントハンドラ側でのパース例:**
+
+```rust
+.on_menu_event(|app, event| {
+    let id = event.id().as_ref();          // &str
+    if let Some(rest) = id.strip_prefix("hist_sub_") {
+        // rest = "42_paste" / "42_pin" / "42_del"
+        let parts: Vec<&str> = rest.splitn(2, '_').collect();
+        let entry_id: i64 = parts[0].parse().unwrap();
+        match parts[1] {
+            "paste" => { /* ペースト処理 */ }
+            "pin"   => { /* ピン留めトグル */ }
+            "del"   => { /* 削除処理 */ }
+            _ => {}
+        }
+    }
+})
 ```
 
 #### Step 6: 自動ペースト（`src-tauri/src/core/paste.rs`）
 
 ```rust
-pub fn capture_foreground() -> HWND          // メニュー表示前に呼ぶ
-pub async fn paste_to(hwnd: HWND, text: &str) // クリップボードにセット→フォーカス戻し→Ctrl+V
+pub fn capture_foreground() -> HWND
+pub async fn paste_to(hwnd: HWND, text: &str, is_writing: Arc<AtomicBool>)
+```
+
+**実装のポイント:**
+
+```rust
+use enigo::{Enigo, Key, Keyboard, Settings};
+
+pub async fn paste_to(hwnd: HWND, text: &str, is_writing: Arc<AtomicBool>) {
+    // 1. 書き込みフラグを立てる（ClipboardWatcher が無視するようにする）
+    is_writing.store(true, Ordering::SeqCst);
+
+    // 2. クリップボードにテキストをセット（Win32 OpenClipboard / SetClipboardData）
+    set_clipboard_text(text);
+
+    // 3. 元のウィンドウにフォーカスを戻す
+    unsafe { SetForegroundWindow(hwnd); }
+    tokio::time::sleep(Duration::from_millis(50)).await;  // フォーカス移動を待つ
+
+    // 4. Ctrl+V を送信
+    let mut enigo = Enigo::new(&Settings::default()).unwrap();
+    enigo.key(Key::Control, enigo::Direction::Press).ok();
+    enigo.key(Key::Unicode('v'), enigo::Direction::Click).ok();
+    enigo.key(Key::Control, enigo::Direction::Release).ok();
+
+    // 5. フラグを戻す（少し待ってから、SetClipboardData の通知が来てから）
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    is_writing.store(false, Ordering::SeqCst);
+}
 ```
 
 #### Step 7: グローバルホットキー登録と非表示ウィンドウ方式
@@ -1083,6 +1206,126 @@ app.handle().plugin(
 
 ---
 
+### 12-2b. Phase 3 準備: Svelte 2ウィンドウ構成
+
+設定画面とスニペット管理画面は**独立した WebView ウィンドウ**として実装する。  
+Svelte でそれぞれ独立したエントリポイントを持つ構成にする。
+
+**ディレクトリ構成:**
+
+```
+src/
+├── main-settings.ts        設定ウィンドウのエントリポイント
+├── main-snippets.ts        スニペットウィンドウのエントリポイント
+├── lib/
+│   └── api.ts              Tauri invoke ラッパー（型付き）
+├── Settings.svelte         設定ウィンドウ本体
+└── Snippets.svelte         スニペット管理ウィンドウ本体
+```
+
+**Vite のマルチエントリ設定（`vite.config.ts`）:**
+
+```ts
+export default defineConfig({
+  plugins: [sveltekit()],
+  build: {
+    rollupOptions: {
+      input: {
+        settings: 'src/main-settings.ts',
+        snippets: 'src/main-snippets.ts',
+      },
+    },
+  },
+});
+```
+
+**`tauri.conf.json` にウィンドウを定義（初期状態は非表示）:**
+
+```json
+{
+  "app": {
+    "windows": [
+      {
+        "label": "settings",
+        "url": "settings.html",
+        "width": 400, "height": 320,
+        "resizable": false,
+        "visible": false,
+        "title": "Settings — clip-win"
+      },
+      {
+        "label": "snippets",
+        "url": "snippets.html",
+        "width": 640, "height": 480,
+        "resizable": true,
+        "visible": false,
+        "title": "Snippets — clip-win"
+      }
+    ]
+  }
+}
+```
+
+**Rust 側でウィンドウを開く:**
+
+```rust
+// open_settings メニューアイテムがクリックされたとき
+MenuId("open_settings") => {
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+```
+
+---
+
+### 12-2c. Phase 3 準備: Windows スタートアップ登録（F21）
+
+Windows の「スタートアップ」はレジストリへの書き込みで実装する。  
+`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` に  
+アプリの実行パスを追加・削除するだけでよい。
+
+**実装（`core/startup.rs`）:**
+
+```rust
+#[cfg(target_os = "windows")]
+pub fn set_startup(enabled: bool) -> anyhow::Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::*;
+
+    let key_path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let app_name = HSTRING::from("clip-win");
+
+    unsafe {
+        let mut hkey = HKEY::default();
+        RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(key_path),
+                      0, KEY_SET_VALUE, &mut hkey)?;
+
+        if enabled {
+            // 現在の実行ファイルパスを取得して登録
+            let exe_path = std::env::current_exe()?;
+            let path_str = HSTRING::from(exe_path.to_string_lossy().as_ref());
+            let bytes = path_str.as_wide();
+            let byte_slice = std::slice::from_raw_parts(
+                bytes.as_ptr() as *const u8,
+                bytes.len() * 2,
+            );
+            RegSetValueExW(hkey, &app_name, 0, REG_SZ, Some(byte_slice))?;
+        } else {
+            let _ = RegDeleteValueW(hkey, &app_name);
+        }
+        RegCloseKey(hkey);
+    }
+    Ok(())
+}
+```
+
+> **注意:** `HKEY_CURRENT_USER` を使えば管理者権限不要。  
+> `HKEY_LOCAL_MACHINE` は全ユーザーへの適用が可能だが管理者権限が必要なため使わない。
+
+---
+
 ### 12-3. Phase 1 完了の確認方法
 
 以下の動作が Windows 上で確認できれば Phase 1 完了。
@@ -1101,8 +1344,10 @@ app.handle().plugin(
 
 | 注意点 | 詳細 |
 |--------|------|
-| クリップボード書き込みループ | ペースト時に自アプリの `ClipboardWatcher` が反応しないよう `is_writing` フラグで抑制する |
+| クリップボード書き込みループ | ペースト時に自アプリの `ClipboardWatcher` が反応しないよう `Arc<AtomicBool>` の `is_writing` フラグで抑制する（`Mutex<bool>` は不可。監視スレッドがブロックしてイベントを取りこぼす） |
 | トレイメニューの再構築コスト | 履歴が変わるたびに `rebuild_tray()` を呼ぶが、高頻度コピー時にちらつく可能性がある。デバウンス（200ms）を検討 |
 | Win32 メッセージループ | `ClipboardWatcher` 用のネイティブウィンドウは専用スレッドで動かす。Tauri のメインスレッドをブロックしないこと |
 | 前ウィンドウの記憶 | `capture_foreground()` はメニューを**表示する直前**に呼ぶ。表示後に呼ぶと clip-win 自身が前ウィンドウになる |
 | SQLite のスレッド安全性 | `rusqlite` はデフォルトでスレッドセーフでないため `Mutex<Connection>` でラップして `AppState` に持たせる |
+| Tauri v2 ケイパビリティ | `capabilities/default.json` に全ウィンドウラベルと使用する権限を列挙しないとランタイムエラー。新しいウィンドウを追加したら忘れず更新する |
+| スタートアップ登録 | `HKEY_CURRENT_USER` を使えば管理者権限不要。実行ファイルパスはインストール先が変わると無効になるので、アップデート時に再登録する処理が必要 |
