@@ -71,8 +71,51 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::save_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("clip-win の起動に失敗しました");
+        .build(tauri::generate_context!())
+        .expect("clip-win の起動に失敗しました")
+        .run(|_app, event| {
+            // アプリ終了時に Win32 リソースを解放する
+            if let tauri::RunEvent::Exit = event {
+                crate::core::clipboard::stop_clipboard_watcher();
+            }
+        });
+}
+
+// ============================================================================
+// ホットキー再登録
+// ============================================================================
+
+/// グローバルショートカットを新しいホットキーで再登録する。
+///
+/// 設定画面でホットキーが変更された際に呼ぶ。
+/// 失敗した場合は旧ホットキーへの復元を試み、エラーメッセージを返す。
+pub(crate) fn re_register_hotkey(app: &AppHandle, new_hotkey: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    // 失敗時の復元用に現在の設定を読む
+    let old_hotkey = app
+        .state::<AppState>()
+        .storage
+        .get_setting("hotkey")
+        .unwrap_or_else(|| "Ctrl+Shift+V".to_string());
+
+    // 既存のショートカットをすべて解除
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())?;
+
+    // 新しいホットキーを登録
+    if let Err(e) = app.global_shortcut().register(new_hotkey) {
+        log::warn!("新しいホットキー '{}' の登録に失敗: {}", new_hotkey, e);
+        // 旧ホットキーに戻す（失敗しても続行）
+        if let Err(e2) = app.global_shortcut().register(&old_hotkey) {
+            log::error!("旧ホットキー '{}' への復元も失敗: {}", old_hotkey, e2);
+        }
+        return Err(format!("ホットキー '{}' は使用できません: {}", new_hotkey, e));
+    }
+
+    log::info!("ホットキーを {} に再登録しました", new_hotkey);
+    Ok(())
 }
 
 // ============================================================================

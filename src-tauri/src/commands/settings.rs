@@ -26,8 +26,16 @@ pub fn get_settings(state: State<'_, AppState>) -> HashMap<String, String> {
 #[tauri::command]
 pub fn save_settings(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     settings: HashMap<String, String>,
 ) -> Result<(), String> {
+    // ホットキーが含まれる場合は先に登録を試みる（DB 保存前の検証）
+    // 登録に失敗した場合は旧ホットキーに戻し、DB も更新しない
+    if let Some(new_hotkey) = settings.get("hotkey") {
+        crate::re_register_hotkey(&app, new_hotkey.as_str())?;
+    }
+
+    // DB に保存
     for (key, value) in &settings {
         state
             .storage

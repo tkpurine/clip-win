@@ -9,7 +9,7 @@
 /// 自アプリがクリップボードに書き込む際（ペースト処理中）、
 /// ClipboardWatcher が自分自身の書き込みを履歴に追加しないよう `is_writing` フラグで抑制する。
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicIsize, Ordering},
     Arc, Mutex, OnceLock,
 };
 
@@ -27,6 +27,10 @@ static CLIPBOARD_TX: OnceLock<Mutex<std::sync::mpsc::Sender<()>>> = OnceLock::ne
 
 /// ペースト処理中フラグへの参照
 static IS_WRITING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Win32 メッセージオンリーウィンドウのハンドル（停止処理用）
+#[cfg(target_os = "windows")]
+static WIN32_HWND: OnceLock<AtomicIsize> = OnceLock::new();
 
 // ============================================================================
 // 公開 API
@@ -150,6 +154,9 @@ fn start_win32_message_loop() {
             return;
         }
 
+        // HWND を保存（stop_clipboard_watcher() からの WM_CLOSE 送信用）
+        WIN32_HWND.get_or_init(|| AtomicIsize::new(hwnd.0));
+
         log::info!("クリップボード監視を開始しました");
 
         // メッセージループ
@@ -157,6 +164,12 @@ fn start_win32_message_loop() {
         while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
             DispatchMessageW(&msg);
         }
+
+        // WM_QUIT 受信後（WM_DESTROY ハンドラが RemoveClipboardFormatListener 済み）
+        // ウィンドウクラスを解放する
+        use windows::Win32::UI::WindowsAndMessaging::UnregisterClassW;
+        let _ = UnregisterClassW(PCWSTR(class_name.as_ptr()), instance);
+        log::info!("クリップボード監視を停止しました");
     });
 }
 
@@ -173,8 +186,16 @@ unsafe extern "system" fn wnd_proc(
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::{
         Foundation::LRESULT,
-        UI::WindowsAndMessaging::{DefWindowProcW, WM_CLIPBOARDUPDATE},
+        System::DataExchange::RemoveClipboardFormatListener,
+        UI::WindowsAndMessaging::{DefWindowProcW, PostQuitMessage, WM_CLIPBOARDUPDATE, WM_DESTROY},
     };
+
+    if msg == WM_DESTROY {
+        // RemoveClipboardFormatListener を呼んでからメッセージループを終了する
+        let _ = RemoveClipboardFormatListener(hwnd);
+        PostQuitMessage(0);
+        return LRESULT(0);
+    }
 
     if msg == WM_CLIPBOARDUPDATE {
         // 自アプリによる書き込み中は無視する
@@ -195,4 +216,30 @@ unsafe extern "system" fn wnd_proc(
     }
 
     DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+// ============================================================================
+// 停止 API
+// ============================================================================
+
+/// クリップボード監視を停止する。アプリ終了時に呼ぶこと。
+///
+/// Win32 メッセージオンリーウィンドウに `WM_CLOSE` を送信し、
+/// `wnd_proc` の `WM_DESTROY` ハンドラ経由でリソースを解放する。
+pub fn stop_clipboard_watcher() {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd_storage) = WIN32_HWND.get() {
+            let hwnd_val = hwnd_storage.load(Ordering::SeqCst);
+            if hwnd_val != 0 {
+                unsafe {
+                    use windows::Win32::{
+                        Foundation::{HWND, LPARAM, WPARAM},
+                        UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE},
+                    };
+                    let _ = PostMessageW(HWND(hwnd_val), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+    }
 }
