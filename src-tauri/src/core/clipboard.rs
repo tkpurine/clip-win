@@ -114,7 +114,13 @@ fn start_win32_message_loop() {
             lpfnWndProc: Some(wnd_proc),
             ..Default::default()
         };
-        RegisterClassW(&wnd_class);
+        if RegisterClassW(&wnd_class) == 0 {
+            log::error!(
+                "RegisterClassW 失敗: {:?}",
+                windows::core::Error::from_win32()
+            );
+            return;
+        }
 
         // メッセージオンリーウィンドウを作成
         let hwnd = match CreateWindowExW(
@@ -179,7 +185,8 @@ unsafe extern "system" fn wnd_proc(
 
         if !is_writing {
             if let Some(tx_lock) = CLIPBOARD_TX.get() {
-                if let Ok(tx) = tx_lock.lock() {
+                // try_lock: 取れなければ今回は無視（次の WM_CLIPBOARDUPDATE で拾われる）
+                if let Ok(tx) = tx_lock.try_lock() {
                     let _ = tx.send(());
                 }
             }

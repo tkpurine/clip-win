@@ -2,7 +2,7 @@
 ///
 /// AppState の定義と Tauri アプリのセットアップを担う。
 use std::sync::{
-    atomic::AtomicBool,
+    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 
@@ -32,8 +32,8 @@ pub struct AppState {
     /// ホットキー押下直前のフォアグラウンドウィンドウハンドル（isize で保持）
     pub prev_hwnd: Mutex<isize>,
 
-    /// 現在のトレイメニュー（トレイアイコン右クリック用）
-    pub tray_menu: Mutex<Option<tauri::menu::Menu<tauri::Wry>>>,
+    /// ホットキーメニュー表示中フラグ（多重起動防止）
+    pub is_menu_open: Arc<AtomicBool>,
 }
 
 // ============================================================================
@@ -103,7 +103,7 @@ fn setup_app(app: &mut tauri::App) -> tauri::Result<()> {
         storage: storage.clone(),
         is_writing: is_writing.clone(),
         prev_hwnd: Mutex::new(0isize),
-        tray_menu: Mutex::new(None),
+        is_menu_open: Arc::new(AtomicBool::new(false)),
     });
 
     // ── 3. トレイアイコンを構築 ───────────────────────────────────────
@@ -157,6 +157,15 @@ fn on_hotkey_pressed(app: &AppHandle) {
     let prev_hwnd = crate::core::paste::capture_foreground();
     {
         let state = app.state::<AppState>();
+
+        // 多重起動ガード: 既にメニューが開いている場合は何もしない
+        if state
+            .is_menu_open
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
         *state.prev_hwnd.lock().unwrap() = prev_hwnd;
     }
 
@@ -173,17 +182,15 @@ fn on_hotkey_pressed(app: &AppHandle) {
         //    rebuild_tray() は run_on_main_thread で非同期なため、
         //    ここで直接構築することで確実に最新データを表示する。
         let state = app_clone.state::<AppState>();
-        let display_count = state
+        let history_limit = state
             .storage
-            .get_setting("menu_display_count")
+            .get_setting("history_limit")
             .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(10);
-        let history = state.storage.get_history(display_count + 50);
+            .unwrap_or(100);
+        let history = state.storage.get_history(history_limit);
 
         match crate::core::tray::build_menu(&app_clone, &history) {
             Ok(menu) => {
-                // tray_menu にも保存しておく（右クリックトレイ表示に使う）
-                *state.tray_menu.lock().unwrap() = Some(menu.clone());
                 if let Some(tray) = app_clone.tray_by_id("main") {
                     let _ = tray.set_menu(Some(&menu));
                 }
@@ -204,5 +211,8 @@ fn on_hotkey_pressed(app: &AppHandle) {
         if let Some(win) = &trigger_win {
             let _ = win.hide();
         }
+
+        // 多重起動ガード解除
+        state.is_menu_open.store(false, Ordering::SeqCst);
     });
 }

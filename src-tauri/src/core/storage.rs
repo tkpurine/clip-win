@@ -95,7 +95,7 @@ impl StorageService {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(100);
 
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
 
         // 直前エントリとの重複チェック
         let recent: Option<String> = conn
@@ -112,15 +112,14 @@ impl StorageService {
             return Ok(());
         }
 
-        // 新規挿入
-        conn.execute(
+        // INSERT + DELETE をトランザクションで実行（クラッシュ時の整合性保証）
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO clipboard_history (content, created_at, is_pinned)
              VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 0)",
             params![content],
         )?;
-
-        // 上限超過分を削除（ピン留め以外で古いものから）
-        conn.execute(
+        tx.execute(
             "DELETE FROM clipboard_history
              WHERE is_pinned = 0
                AND id NOT IN (
@@ -131,6 +130,7 @@ impl StorageService {
                )",
             params![limit],
         )?;
+        tx.commit()?;
 
         Ok(())
     }
@@ -138,26 +138,53 @@ impl StorageService {
     /// 履歴を取得する。ピン留め優先、次いで新しい順。
     pub fn get_history(&self, limit: i64) -> Vec<ClipboardEntry> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, content, created_at, is_pinned
-                 FROM clipboard_history
-                 ORDER BY is_pinned DESC, created_at DESC
-                 LIMIT ?1",
-            )
-            .unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id, content, created_at, is_pinned
+             FROM clipboard_history
+             ORDER BY is_pinned DESC, created_at DESC
+             LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("get_history prepare 失敗: {}", e);
+                return Vec::new();
+            }
+        };
 
-        stmt.query_map(params![limit], |row| {
+        match stmt.query_map(params![limit], |row| {
             Ok(ClipboardEntry {
                 id: row.get(0)?,
                 content: row.get(1)?,
                 created_at: row.get(2)?,
                 is_pinned: row.get::<_, i64>(3)? != 0,
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        }) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::error!("get_history query 失敗: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// 指定 ID の履歴エントリを1件取得する。
+    pub fn get_history_by_id(&self, id: i64) -> Option<ClipboardEntry> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, content, created_at, is_pinned
+             FROM clipboard_history
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ClipboardEntry {
+                    id: row.get(0)?,
+                    content: row.get(1)?,
+                    created_at: row.get(2)?,
+                    is_pinned: row.get::<_, i64>(3)? != 0,
+                })
+            },
+        )
+        .ok()
     }
 
     /// 指定 ID の履歴エントリを削除する。
@@ -218,49 +245,64 @@ impl StorageService {
 
     pub fn get_snippets_by_folder(&self, folder_id: Option<i64>) -> Vec<Snippet> {
         let conn = self.conn.lock().unwrap();
-        let (query, id_val): (&str, i64) = match folder_id {
-            Some(id) => (
-                "SELECT id, folder_id, title, content, sort_order, created_at
-                 FROM snippets WHERE folder_id = ?1 ORDER BY sort_order ASC",
-                id,
-            ),
-            None => (
-                "SELECT id, folder_id, title, content, sort_order, created_at
-                 FROM snippets WHERE folder_id IS NULL ORDER BY sort_order ASC",
-                0,
-            ),
-        };
 
-        if folder_id.is_none() {
-            let mut stmt = conn.prepare(query).unwrap();
-            stmt.query_map([], |row| {
-                Ok(Snippet {
-                    id: row.get(0)?,
-                    folder_id: row.get(1)?,
-                    title: row.get(2)?,
-                    content: row.get(3)?,
-                    sort_order: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
-        } else {
-            let mut stmt = conn.prepare(query).unwrap();
-            stmt.query_map(params![id_val], |row| {
-                Ok(Snippet {
-                    id: row.get(0)?,
-                    folder_id: row.get(1)?,
-                    title: row.get(2)?,
-                    content: row.get(3)?,
-                    sort_order: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        match folder_id {
+            Some(id) => {
+                let mut stmt = match conn.prepare(
+                    "SELECT id, folder_id, title, content, sort_order, created_at
+                     FROM snippets WHERE folder_id = ?1 ORDER BY sort_order ASC",
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("get_snippets_by_folder prepare 失敗: {}", e);
+                        return Vec::new();
+                    }
+                };
+                match stmt.query_map(params![id], |row| {
+                    Ok(Snippet {
+                        id: row.get(0)?,
+                        folder_id: row.get(1)?,
+                        title: row.get(2)?,
+                        content: row.get(3)?,
+                        sort_order: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                }) {
+                    Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                    Err(e) => {
+                        log::error!("get_snippets_by_folder query 失敗: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
+            None => {
+                let mut stmt = match conn.prepare(
+                    "SELECT id, folder_id, title, content, sort_order, created_at
+                     FROM snippets WHERE folder_id IS NULL ORDER BY sort_order ASC",
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("get_snippets_by_folder(null) prepare 失敗: {}", e);
+                        return Vec::new();
+                    }
+                };
+                match stmt.query_map([], |row| {
+                    Ok(Snippet {
+                        id: row.get(0)?,
+                        folder_id: row.get(1)?,
+                        title: row.get(2)?,
+                        content: row.get(3)?,
+                        sort_order: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                }) {
+                    Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+                    Err(e) => {
+                        log::error!("get_snippets_by_folder(null) query 失敗: {}", e);
+                        Vec::new()
+                    }
+                }
+            }
         }
     }
 

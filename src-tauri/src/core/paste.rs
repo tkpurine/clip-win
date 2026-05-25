@@ -111,8 +111,12 @@ async fn send_ctrl_v() {
             }
         };
         let _ = enigo.key(Key::Control, Direction::Press);
-        let _ = enigo.key(Key::Unicode('v'), Direction::Click);
+        let click_result = enigo.key(Key::Unicode('v'), Direction::Click);
+        // Press が成功 / 失敗にかかわらず必ず Release を実行（Ctrl 固着防止）
         let _ = enigo.key(Key::Control, Direction::Release);
+        if let Err(e) = click_result {
+            log::error!("Ctrl+V のキー送信に失敗: {}", e);
+        }
     })
     .await;
 

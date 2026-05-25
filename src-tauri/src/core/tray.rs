@@ -37,15 +37,13 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .expect("トレイアイコンの読み込みに失敗しました");
 
     let state = app.state::<crate::AppState>();
-    let display_count = state
+    let history_limit = state
         .storage
-        .get_setting("menu_display_count")
+        .get_setting("history_limit")
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(10);
-    let history = state.storage.get_history(display_count + 50);
+        .unwrap_or(100);
+    let history = state.storage.get_history(history_limit);
     let menu = build_menu(app, &history)?;
-
-    *state.tray_menu.lock().unwrap() = Some(menu.clone());
 
     TrayIconBuilder::with_id("main")
         .icon(icon)
@@ -214,16 +212,15 @@ pub fn rebuild_tray(app: &AppHandle) {
     let app_clone = app.clone();
     let _ = app.run_on_main_thread(move || {
         let state = app_clone.state::<crate::AppState>();
-        let display_count = state
+        let history_limit = state
             .storage
-            .get_setting("menu_display_count")
+            .get_setting("history_limit")
             .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(10);
-        let history = state.storage.get_history(display_count + 50);
+            .unwrap_or(100);
+        let history = state.storage.get_history(history_limit);
 
         match build_menu(&app_clone, &history) {
             Ok(new_menu) => {
-                *state.tray_menu.lock().unwrap() = Some(new_menu.clone());
                 if let Some(tray) = app_clone.tray_by_id("main") {
                     if let Err(e) = tray.set_menu(Some(&new_menu)) {
                         log::warn!("トレイメニューの更新に失敗しました: {}", e);
@@ -289,8 +286,7 @@ fn handle_entry_action(app: &AppHandle, entry_id: i64, action: &str) {
 
     match action {
         "paste" => {
-            let history = state.storage.get_history(200);
-            if let Some(entry) = history.into_iter().find(|e| e.id == entry_id) {
+            if let Some(entry) = state.storage.get_history_by_id(entry_id) {
                 let text = entry.content.clone();
                 let is_writing = state.is_writing.clone();
                 let prev_hwnd = *state.prev_hwnd.lock().unwrap();
