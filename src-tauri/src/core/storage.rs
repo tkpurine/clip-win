@@ -225,22 +225,28 @@ impl StorageService {
 
     pub fn get_snippet_folders(&self) -> Vec<SnippetFolder> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, sort_order FROM snippet_folders ORDER BY sort_order ASC",
-            )
-            .unwrap();
-
-        stmt.query_map([], |row| {
+        let mut stmt = match conn.prepare(
+            "SELECT id, name, sort_order FROM snippet_folders ORDER BY sort_order ASC",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("get_snippet_folders prepare 失敗: {}", e);
+                return Vec::new();
+            }
+        };
+        match stmt.query_map([], |row| {
             Ok(SnippetFolder {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 sort_order: row.get(2)?,
             })
-        })
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect()
+        }) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::error!("get_snippet_folders query 失敗: {}", e);
+                Vec::new()
+            }
+        }
     }
 
     pub fn get_snippets_by_folder(&self, folder_id: Option<i64>) -> Vec<Snippet> {

@@ -126,18 +126,18 @@ fn setup_app(app: &mut tauri::App) -> tauri::Result<()> {
     // ── 1. DB パスを取得して StorageService を初期化 ─────────────────
     let db_dir = app
         .path()
-        .app_data_dir()
-        .expect("AppData ディレクトリの取得に失敗しました");
+        .app_data_dir()?;
     std::fs::create_dir_all(&db_dir)
-        .expect("AppData ディレクトリの作成に失敗しました");
+        .map_err(tauri::Error::Io)?;
     let db_path = db_dir.join("clip-win.db");
-    let db_path_str = db_path
-        .to_str()
-        .expect("DB パスの変換に失敗しました");
+    let db_path_str = db_path.to_string_lossy().into_owned();
 
     let storage = Arc::new(
-        crate::core::storage::StorageService::new(db_path_str)
-            .expect("StorageService の初期化に失敗しました"),
+        crate::core::storage::StorageService::new(&db_path_str)
+            .map_err(|e| tauri::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )))?,
     );
     let is_writing = Arc::new(AtomicBool::new(false));
 
@@ -214,6 +214,16 @@ fn on_hotkey_pressed(app: &AppHandle) {
 
     let app_clone = app.clone();
     std::thread::spawn(move || {
+        // パニック時も含めて is_menu_open を確実に false に戻す Drop ガード
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let state = app_clone.state::<AppState>();
+        let _guard = Guard(state.is_menu_open.clone());
+
         // 2. hotkey-trigger ウィンドウを表示してフォーカスを確保
         let trigger_win = app_clone.get_webview_window("hotkey-trigger");
         if let Some(win) = &trigger_win {
@@ -224,7 +234,6 @@ fn on_hotkey_pressed(app: &AppHandle) {
         // 3. 最新の履歴でメニューをその場で構築
         //    rebuild_tray() は run_on_main_thread で非同期なため、
         //    ここで直接構築することで確実に最新データを表示する。
-        let state = app_clone.state::<AppState>();
         let history_limit = state
             .storage
             .get_setting("history_limit")
@@ -254,8 +263,6 @@ fn on_hotkey_pressed(app: &AppHandle) {
         if let Some(win) = &trigger_win {
             let _ = win.hide();
         }
-
-        // 多重起動ガード解除
-        state.is_menu_open.store(false, Ordering::SeqCst);
+        // 多重起動ガード解除は _guard の Drop に委譲する
     });
 }
