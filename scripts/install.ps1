@@ -68,13 +68,15 @@ Write-Success "winget が使用可能です"
 Write-Step "Step 1/4: Visual Studio Build Tools 2022 の確認"
 
 $vsBuildToolsInstalled = $false
-$vsInstances = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-    -products Microsoft.VisualStudio.Product.BuildTools `
-    -requires Microsoft.VisualStudio.Workload.VCTools `
-    -format json 2>$null | ConvertFrom-Json
-
-if ($vsInstances -and $vsInstances.Count -gt 0) {
-    $vsBuildToolsInstalled = $true
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+    $vsInstances = & $vswhere `
+        -products Microsoft.VisualStudio.Product.BuildTools `
+        -requires Microsoft.VisualStudio.Workload.VCTools `
+        -format json 2>$null | ConvertFrom-Json
+    if ($vsInstances -and $vsInstances.Count -gt 0) {
+        $vsBuildToolsInstalled = $true
+    }
 }
 
 if ($vsBuildToolsInstalled) {
